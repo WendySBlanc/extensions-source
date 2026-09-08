@@ -40,12 +40,6 @@ import kotlin.math.max
 @Source
 abstract class NovelFrance : HttpSource() {
 
-    override val name = "NovelFrance"
-
-    override val baseUrl = "https://novelfrance.fr"
-
-    override val lang = "fr"
-
     override val supportsLatest = true
 
     private val pageCache = ConcurrentHashMap<String, List<String>>()

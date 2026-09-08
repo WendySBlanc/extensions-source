@@ -44,6 +44,7 @@
 :src:fr:manganova
 :src:fr:mangasoriginesfr
 :src:fr:mangasscans
+:src:fr:novelfrance
 :src:fr:poseidonscans
 :src:fr:raijinscans
 :src:fr:rimuscans

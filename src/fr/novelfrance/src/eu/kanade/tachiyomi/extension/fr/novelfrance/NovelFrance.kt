@@ -16,6 +16,7 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
+import keiyoushi.annotation.Source
 import keiyoushi.utils.parseAs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -36,7 +37,8 @@ import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.max
 
-class NovelFrance : HttpSource() {
+@Source
+abstract class NovelFrance : HttpSource() {
 
     override val name = "NovelFrance"
 

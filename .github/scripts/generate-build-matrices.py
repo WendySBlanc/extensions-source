@@ -248,9 +248,56 @@ def create_matrix(modules: list[str]) -> dict:
     }
 
 
+def get_selected_modules() -> set[str] | None:
+    modules_file = os.getenv("NOVA_MODULES_FILE")
+    if not modules_file:
+        return None
+
+    modules = {
+        line.strip()
+        for line in Path(modules_file).read_text("utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    invalid = sorted(module for module in modules if not MODULE_REGEX.match(module))
+    if invalid:
+        raise ValueError(f"Invalid modules in {modules_file}: {invalid}")
+    return modules
+
+
+def restrict_to_selected_modules(
+    ref: str,
+    modules: list[str],
+    deleted: list[str],
+) -> tuple[list[str], list[str]]:
+    selected = get_selected_modules()
+    if selected is None:
+        return modules, deleted
+
+    selected_suffixes = set()
+    existing_selected = set()
+    for module in selected:
+        match = MODULE_REGEX.match(module)
+        if match is None:
+            continue
+        lang = match.group("lang")
+        extension = match.group("extension")
+        selected_suffixes.add(resolve_module_suffix(ref, lang, extension))
+        if Path("src", lang, extension, "build.gradle.kts").is_file():
+            existing_selected.add(module)
+
+    if os.getenv("NOVA_BUILD_ALL_SELECTED", "false").lower() == "true":
+        return sorted(existing_selected), sorted(selected_suffixes)
+
+    return (
+        sorted(set(modules) & existing_selected),
+        sorted(set(deleted) & selected_suffixes),
+    )
+
+
 def main() -> None:
     _, ref = sys.argv
     modules, deleted, lint_modules = get_module_list(ref)
+    modules, deleted = restrict_to_selected_modules(ref, modules, deleted)
 
     matrix = create_matrix(modules)
 

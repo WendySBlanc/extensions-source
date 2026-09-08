@@ -9,8 +9,15 @@ on:
       - '!**.md'
       - '!.github/**'
       - '.github/scripts/**'
+      - '.github/nova-installed-modules.txt'
       - '.github/workflows/build_push.yml'
   workflow_dispatch:
+    inputs:
+      build_all:
+        description: Rebuild every extension installed in Nova
+        required: false
+        default: true
+        type: boolean
 
 permissions: {}
 
@@ -21,6 +28,8 @@ concurrency:
 env:
   CI_CHUNK_SIZE: 80
   IS_PR_CHECK: false
+  NOVA_MODULES_FILE: .github/nova-installed-modules.txt
+  NOVA_BUILD_ALL_SELECTED: ${{ github.event_name == 'workflow_dispatch' && inputs.build_all }}
 
 jobs:
   prepare:
@@ -91,7 +100,7 @@ jobs:
 
       - name: Upload APKs (${{ matrix.chunk.number }})
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: "github.repository == 'keiyoushi/extensions-source'"
+        if: "github.repository == 'WendySBlanc/extensions-source'"
         with:
           name: "individual-apks-${{ matrix.chunk.number }}"
           path: |
@@ -110,7 +119,7 @@ jobs:
     # Run whenever there's anything to publish, new/changed builds OR only deletions
     if: >-
       always() &&
-      github.repository == 'keiyoushi/extensions-source' &&
+      github.repository == 'WendySBlanc/extensions-source' &&
       needs.prepare.result == 'success' &&
       needs.build.result != 'failure' &&
       needs.build.result != 'cancelled' &&
@@ -134,7 +143,7 @@ jobs:
       - name: Checkout repo branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: keiyoushi/extensions
+          repository: WendySBlanc/extensions
           token: ${{ secrets.BOT_PAT }}
           ref: repo
           path: repo
@@ -148,15 +157,15 @@ jobs:
           cd repo
           pip install protobuf
           python -u ../main/.github/scripts/publish-repo.py "$DELETE" "$GITHUB_SHA"
-          git config --global user.email "156378334+keiyoushi-bot@users.noreply.github.com"
-          git config --global user.name "keiyoushi-bot"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
           git status
           if [ -n "$(git status --porcelain)" ]; then
             git add .
             git commit -m "Update extensions repo"
             git push
-            curl https://purge.jsdelivr.net/gh/keiyoushi/extensions@repo/index.json
-            curl https://purge.jsdelivr.net/gh/keiyoushi/extensions@repo/index.pb
+            curl https://purge.jsdelivr.net/gh/WendySBlanc/extensions@repo/index.json
+            curl https://purge.jsdelivr.net/gh/WendySBlanc/extensions@repo/index.pb
           else
             echo "No changes to commit"
           fi

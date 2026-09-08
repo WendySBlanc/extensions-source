@@ -18,8 +18,9 @@ ARTIFACTS_DIR = Path.home() / "apk-artifacts"
 # The checked-out `repo` branch we publish into (the working directory).
 REPO_DIR = Path.cwd()
 
-ICON_BASE_URL = "https://cdn.jsdelivr.net/gh/keiyoushi/extensions-source@main"
+ICON_BASE_URL = "https://cdn.jsdelivr.net/gh/WendySBlanc/extensions-source@main"
 RELEASE_BASE_URL = f"https://github.com/{REPO_NAME}/releases/download"
+NOVA_SIGNING_KEY = "f25a2ca5f93f7af24de9afff1a5afc2cf7600d3d87af03d8497a0ae4865de701"
 ASSET_LIMIT = 495  # Actual limit is 1000 but we upload 2 items per extension.
 UPLOAD_CHUNK_SIZE = 80
 UPLOAD_CHUNK_INTERVAL = 30
@@ -31,12 +32,16 @@ current_sha_short = current_sha[:7]
 with REPO_DIR.joinpath("index.json").open() as f:
     remote_proto = json_format.Parse(f.read(), index_pb2.Index())
 
+# Never merge APK metadata signed by another repository into Nova's catalog.
+if remote_proto.signingKey != NOVA_SIGNING_KEY:
+    remote_proto = index_pb2.Index()
+
 remote_extensions = {
     ext.packageName: ext for ext in remote_proto.extensionList.extensions
 }
 
 release_assets_path = REPO_DIR / "release-assets.json"
-if release_assets_path.exists():
+if release_assets_path.exists() and remote_proto.signingKey == NOVA_SIGNING_KEY:
     with release_assets_path.open() as f:
         release_assets = json.load(f)
 else:
@@ -183,12 +188,11 @@ final_extensions.extend(ext for ext, _, _, _, _ in new_extensions)
 final_extensions.sort(key=lambda ext: ext.packageName)
 
 index = index_pb2.Index(
-    name="Keiyoushi",
-    badgeLabel="KEI",
-    signingKey="9add655a78e96c4ec7a53ef89dccb557cb5d767489fac5e785d671a5a75d4da2",
+    name="Nova Extensions",
+    badgeLabel="NOVA",
+    signingKey=NOVA_SIGNING_KEY,
     contact=index_pb2.Contact(
-        website="https://keiyoushi.github.io",
-        discord="https://discord.gg/3FbCpdKbdY",
+        website="https://github.com/WendySBlanc/extensions",
     ),
     extensionList=index_pb2.ExtensionList(extensions=final_extensions),
 )
@@ -249,7 +253,7 @@ def create_release(tag: str):
         "--title",
         f"Repository Update {tag}",
         "--notes",
-        f"Automated update from keiyoushi/extensions-source@{current_sha}",
+        f"Automated update from WendySBlanc/extensions-source@{current_sha}",
     )
 
 

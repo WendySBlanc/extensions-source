@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "Lua Scans"
-    versionCode = 20
+    versionCode = 21
     contentWarning = ContentWarning.SAFE
     libVersion = "1.6"
     theme = "heancms"

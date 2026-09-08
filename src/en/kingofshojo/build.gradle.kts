@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "King of Shojo"
-    versionCode = 0
+    versionCode = 1
     contentWarning = ContentWarning.MIXED
     libVersion = "1.4"
     theme = "mangathemesia"

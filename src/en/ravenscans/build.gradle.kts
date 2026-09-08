@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "Raven Scans"
-    versionCode = 5
+    versionCode = 6
     contentWarning = ContentWarning.MIXED
     libVersion = "1.4"
     theme = "mangathemesia"

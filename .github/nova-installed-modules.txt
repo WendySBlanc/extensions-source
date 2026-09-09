@@ -1,20 +1,24 @@
-# Extensions reported as active by Nova on 2026-09-08.
+# Extensions reported as active by Nova on 2026-09-08, plus verified replacements.
 :src:all:comicskingdom
 :src:all:commitstrip
 :src:all:cubari
 :src:all:izneo
 :src:all:kagane
+:src:all:manta
 :src:all:mangaplus
 :src:all:mangatoon
 :src:all:projectsuki
 :src:all:tappytoon
 :src:all:thelibraryofohara
+:src:all:webcomics
+:src:ar:lavascans
 :src:en:alandal
 :src:en:assortedscans
 :src:en:asurascans
 :src:en:erosscans
 :src:en:firescans
 :src:en:flamecomics
+:src:en:galaxymanga
 :src:en:hivescans
 :src:en:kewnscans
 :src:en:kingofshojo
@@ -31,6 +35,7 @@
 :src:en:reallifecomics
 :src:en:roliascan
 :src:en:setsuscans
+:src:en:thunderscans
 :src:en:valirscans
 :src:en:vortexscans
 :src:fr:animesama
@@ -45,6 +50,7 @@
 :src:fr:mangasoriginesfr
 :src:fr:mangasscans
 :src:fr:novelfrance
+:src:fr:phenixscansco
 :src:fr:poseidonscans
 :src:fr:raijinscans
 :src:fr:rimuscans

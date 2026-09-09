@@ -38,13 +38,23 @@ abstract class DassouScan : HttpSource() {
     override fun popularMangaParse(response: Response): MangasPage {
         val document = response.asJsoup()
 
-        val mangas = document.select("article.featured-card").map { element ->
+        val mangas = document.select("article.featured-card, article.dsc-cat-card").map { element ->
             SManga.create().apply {
                 title = element.attr("data-title").takeIf { it.isNotEmpty() } ?: throw Exception("Title is empty")
-                setUrlWithoutDomain(element.selectFirst("a.dsc-card-link")!!.absUrl("href"))
+                val link = element.selectFirst(
+                    "a.dsc-card-link, a.dsc-cat-card__cover-link, a.dsc-cat-card__open, h2 a",
+                )!!
+                setUrlWithoutDomain(link.absUrl("href"))
 
-                val bgStyle = element.selectFirst(".cover")?.attr("style") ?: ""
-                thumbnail_url = bgStyle.substringAfter("url(").substringBefore(")").removeSurrounding("\"").removeSurrounding("'")
+                val image = element.selectFirst(".dsc-cat-card__cover img, .cover img")
+                thumbnail_url = image?.absUrl("data-src").orEmpty()
+                    .ifEmpty { image?.absUrl("src").orEmpty() }
+                    .ifEmpty {
+                        val bgStyle = element.selectFirst(".cover")?.attr("style").orEmpty()
+                        bgStyle.substringAfter("url(").substringBefore(")")
+                            .removeSurrounding("\"")
+                            .removeSurrounding("'")
+                    }
             }
         }
 
@@ -87,11 +97,20 @@ abstract class DassouScan : HttpSource() {
 
         return SManga.create().apply {
             title = document.selectFirst("h1")?.text()?.takeIf { it.isNotEmpty() } ?: throw Exception("Manga title is missing")
-            description = document.selectFirst(".hero-synopsis p")?.text()
-            genre = document.select(".hero-tags a.tag:not(.tag--dsc-tag)").joinToString { it.text() }
+            description = document.selectFirst(".dsc-mf__synopsis-text, .hero-synopsis p")
+                ?.let { it.attr("data-full").ifEmpty(it::text) }
+            genre = document.select(".dsc-mf__tags a.dsc-mf__tag, .hero-tags a.tag:not(.tag--dsc-tag)")
+                .joinToString { it.text() }
 
-            val bgStyle = document.selectFirst(".cover")?.attr("style") ?: ""
-            thumbnail_url = bgStyle.substringAfter("url(").substringBefore(")").removeSurrounding("\"").removeSurrounding("'")
+            val image = document.selectFirst(".dsc-mf__cover img, .cover img")
+            thumbnail_url = image?.absUrl("data-src").orEmpty()
+                .ifEmpty { image?.absUrl("src").orEmpty() }
+                .ifEmpty {
+                    val bgStyle = document.selectFirst(".cover")?.attr("style").orEmpty()
+                    bgStyle.substringAfter("url(").substringBefore(")")
+                        .removeSurrounding("\"")
+                        .removeSurrounding("'")
+                }
         }
     }
 

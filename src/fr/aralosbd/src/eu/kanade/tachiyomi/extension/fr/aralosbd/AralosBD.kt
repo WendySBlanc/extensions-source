@@ -129,7 +129,7 @@ abstract class AralosBD : HttpSource() {
         val searchResult = json.decodeFromString<List<AralosBDChapter>>(response.body.string())
 
         val validSearchResults = mutableListOf<AralosBDChapter>()
-        searchResult.filterTo(validSearchResults) { it.chapter_released == "1" }
+        searchResult.filterTo(validSearchResults) { it.chapter_released == 1 }
 
         return validSearchResults.map(::chapterToSChapter)
     }
@@ -183,11 +183,7 @@ abstract class AralosBD : HttpSource() {
 data class AralosBDSearchManga(
     val icon: String = "",
     val title: String = "",
-    val id: String = "",
-    val read_count: String = "",
-    val chapter_count: String = "",
-    val is_favorite: Boolean = false,
-    val is_liked: Boolean = false,
+    val id: Int = 0,
 )
 
 @Serializable
@@ -224,29 +220,19 @@ data class AralosBDManga(
     val main_title: String = "",
     val fulldescription: String? = "",
     val description: String = "",
-    val year: String = "",
     val id: Int = 0,
-    val alternative_titles: List<AralosBDAlternativeTitle>? = emptyList(),
     val authors: List<AralosBDAuthor>? = emptyList(),
-    val translators: List<AralosBDTranslator>? = emptyList(),
     val tags: List<AralosBDTag>? = emptyList(),
-    val banner: String = "",
     val icon: String = "",
-    val error: Int = 0,
 )
 
 @Serializable
 data class AralosBDChapter(
     val chapter_number: String = "",
-    val chapter_user: String = "",
     val chapter_title: String = "",
     val chapter_translator: String? = "",
-    val chapter_view_count: String = "",
-    val chapter_like_count: String = "",
-    val chapter_date: String = "",
-    val chapter_id: String = "",
-    val chapter_read: Boolean = false,
-    val chapter_released: String = "0",
+    val chapter_id: Int = 0,
+    val chapter_released: Int = 0,
     val chapter_release_time: String = "",
 )
 

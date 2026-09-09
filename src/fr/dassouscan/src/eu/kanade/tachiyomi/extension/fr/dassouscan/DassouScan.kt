@@ -38,9 +38,15 @@ abstract class DassouScan : HttpSource() {
     override fun popularMangaParse(response: Response): MangasPage {
         val document = response.asJsoup()
 
-        val mangas = document.select("article.featured-card, article.dsc-cat-card").map { element ->
+        val cards = document.select("article.dsc-cat-card").ifEmpty {
+            document.select("article.featured-card")
+        }
+        val mangas = cards.map { element ->
             SManga.create().apply {
-                title = element.attr("data-title").takeIf { it.isNotEmpty() } ?: throw Exception("Title is empty")
+                title = element.attr("data-title").ifEmpty {
+                    element.selectFirst(".dsc-cat-card__title a, h2 a")?.text().orEmpty()
+                }
+                if (title.isEmpty()) throw Exception("Title is empty")
                 val link = element.selectFirst(
                     "a.dsc-card-link, a.dsc-cat-card__cover-link, a.dsc-cat-card__open, h2 a",
                 )!!

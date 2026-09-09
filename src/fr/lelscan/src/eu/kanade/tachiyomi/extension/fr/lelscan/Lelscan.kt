@@ -123,11 +123,12 @@ abstract class Lelscan : HttpSource() {
 
     override fun pageListParse(response: Response): List<Page> {
         val document = response.asJsoup()
+        val chapterPrefix = response.request.url.toString().substringBeforeLast('/') + "/"
         return document.select("a[href]")
             .mapNotNull { link ->
                 val url = link.attr("abs:href")
                 val page = url.substringAfterLast('/').toIntOrNull() ?: return@mapNotNull null
-                if (!url.contains("/scan-")) return@mapNotNull null
+                if (!url.startsWith(chapterPrefix)) return@mapNotNull null
                 page to url
             }
             .distinctBy { it.second }

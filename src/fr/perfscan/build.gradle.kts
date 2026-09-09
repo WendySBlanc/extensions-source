@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "Perf Scan"
-    versionCode = 31
+    versionCode = 32
     contentWarning = ContentWarning.NSFW // or MIXED, please confirm
     libVersion = "1.4"
 

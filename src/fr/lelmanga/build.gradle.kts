@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "Lelmanga"
-    versionCode = 2
+    versionCode = 3
     contentWarning = ContentWarning.SAFE
     libVersion = "1.4"
     theme = "mangathemesia"

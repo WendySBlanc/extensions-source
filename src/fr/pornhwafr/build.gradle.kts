@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "Pornhwa.fr"
-    versionCode = 0
+    versionCode = 1
     contentWarning = ContentWarning.NSFW
     libVersion = "1.4"
     theme = "mangathemesia"

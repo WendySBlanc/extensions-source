@@ -26,8 +26,9 @@ abstract class Lelscan : HttpSource() {
 
     override fun popularMangaParse(response: Response): MangasPage {
         val document = response.asJsoup()
-        val mangas = document.select("#navigation select").first()
-            ?.select("option")
+        val mangas = document.select("#navigation select")
+            .firstOrNull { it.select("option[value*=lecture-]").isNotEmpty() }
+            ?.select("option[value*=lecture-]")
             ?.map { option ->
                 SManga.create().apply {
                     title = option.text()
@@ -67,8 +68,9 @@ abstract class Lelscan : HttpSource() {
     override fun searchMangaParse(response: Response): MangasPage {
         val query = response.request.url.fragment.orEmpty()
         val document = response.asJsoup()
-        val mangas = document.select("#navigation select").first()
-            ?.select("option")
+        val mangas = document.select("#navigation select")
+            .firstOrNull { it.select("option[value*=lecture-]").isNotEmpty() }
+            ?.select("option[value*=lecture-]")
             ?.filter { it.text().contains(query, ignoreCase = true) }
             ?.map { option ->
                 SManga.create().apply {
@@ -100,9 +102,9 @@ abstract class Lelscan : HttpSource() {
 
     override fun chapterListParse(response: Response): List<SChapter> {
         val document = response.asJsoup()
-        // The second <select> in #navigation is the chapter dropdown (descending order).
-        return document.select("#navigation select").getOrNull(1)
-            ?.select("option")
+        return document.select("#navigation select")
+            .firstOrNull { it.select("option[value*=/scan-]").isNotEmpty() }
+            ?.select("option[value*=/scan-]")
             ?.map { option ->
                 val chapterNum = option.text().toFloatOrNull() ?: -1f
                 SChapter.create().apply {
@@ -121,12 +123,16 @@ abstract class Lelscan : HttpSource() {
 
     override fun pageListParse(response: Response): List<Page> {
         val document = response.asJsoup()
-        return document.select("#navigation select").getOrNull(2)
-            ?.select("option")
-            ?.mapIndexed { index, option ->
-                Page(index, url = option.attr("abs:value"))
+        return document.select("a[href]")
+            .mapNotNull { link ->
+                val url = link.attr("abs:href")
+                val page = url.substringAfterLast('/').toIntOrNull() ?: return@mapNotNull null
+                if (!url.contains("/scan-")) return@mapNotNull null
+                page to url
             }
-            .orEmpty()
+            .distinctBy { it.second }
+            .sortedBy { it.first }
+            .mapIndexed { index, (_, url) -> Page(index, url = url) }
     }
 
     override fun imageUrlParse(response: Response): String = response.asJsoup().selectFirst("#image img")?.attr("abs:src").orEmpty()

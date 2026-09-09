@@ -12,4 +12,6 @@ class LanorMangaDto(
     val description: String = "",
     val image: String = "",
     val coverImage: String = "",
+    val cover: String = "",
+    val author: String = "",
 )

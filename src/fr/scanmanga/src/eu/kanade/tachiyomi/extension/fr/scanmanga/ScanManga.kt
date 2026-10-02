@@ -35,6 +35,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import org.jsoup.Jsoup
 import rx.Observable
+import java.io.IOException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -46,8 +47,9 @@ abstract class ScanManga :
     ConfigurableSource {
 
     private val domain = baseUrl.toHttpUrl().host
-    private val baseImageUrl = "https://static.$domain/img/manga"
-    private val baseSearchUrl = "https://bqj.$domain/search/quick.json"
+    private val rootDomain = baseUrl.toHttpUrl().topPrivateDomain() ?: domain
+    private val baseImageUrl = "https://static.$rootDomain/img/manga"
+    private val baseSearchUrl = "https://bqj.$rootDomain/search/quick.json"
 
     override val supportsLatest = true
 
@@ -67,13 +69,19 @@ abstract class ScanManga :
         .addNetworkInterceptor(stripEmptyXRequestedWith)
         .build()
 
-    // Reader-page fetches reuse the app client (cache, gzip, DoH, cookie jar, etc.) but strip
-    // the host's CloudflareInterceptor — that interceptor wastes ~30 s per call trying its own
-    // headless solve before throwing, blowing up our polling.
+    // Reader-page fetches retain the shared cache, DNS and cookies. Explicit request headers
+    // already provide the user agent, so application interceptors can be cleared without
+    // inspecting their runtime classes. This also avoids host-specific getClass() crashes.
     private val readerClient: OkHttpClient by lazy {
         client.newBuilder()
-            .apply { interceptors().removeAll { it.javaClass.simpleName == "CloudflareInterceptor" } }
+            .apply { interceptors().clear() }
             .build()
+    }
+
+    private fun Response.requireSourceResponse() {
+        if (!isSuccessful) {
+            throw IOException("Scan-Manga est indisponible (HTTP $code). Réessayez plus tard ou ouvrez la WebView.")
+        }
     }
 
     override fun headersBuilder(): Headers.Builder = super.headersBuilder()
@@ -90,6 +98,7 @@ abstract class ScanManga :
     override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/TOP-Manga-Webtoon-45.html", headers)
 
     override fun popularMangaParse(response: Response): MangasPage {
+        response.requireSourceResponse()
         val mangas = response.asJsoup().select("#carouselTOPContainer > div.top").map { element ->
             SManga.create().apply {
                 val titleElement = element.selectFirst("a.atop")!!
@@ -107,6 +116,7 @@ abstract class ScanManga :
     override fun latestUpdatesRequest(page: Int): Request = GET(baseUrl, headers)
 
     override fun latestUpdatesParse(response: Response): MangasPage {
+        response.requireSourceResponse()
         val document = response.asJsoup()
 
         val mangas = document.select("#content_news .publi").map { element ->
@@ -139,6 +149,7 @@ abstract class ScanManga :
     }
 
     override fun searchMangaParse(response: Response): MangasPage {
+        response.requireSourceResponse()
         val json = response.body.string()
         if (json == "[]") {
             return MangasPage(emptyList(), false)
@@ -158,6 +169,7 @@ abstract class ScanManga :
 
     // Details
     override fun mangaDetailsParse(response: Response): SManga {
+        response.requireSourceResponse()
         val document = response.asJsoup()
 
         return SManga.create().apply {
@@ -179,6 +191,7 @@ abstract class ScanManga :
 
     // Chapters
     override fun chapterListParse(response: Response): List<SChapter> {
+        response.requireSourceResponse()
         val document = response.asJsoup()
         return document.select("div.chapt_m").map { element ->
             val linkEl = element.selectFirst("td.publimg span.i a")!!
@@ -361,10 +374,14 @@ abstract class ScanManga :
         }
     }
 
-    override fun pageListParse(response: Response): List<Page> = parsePageList(response.asJsoup())
+    override fun pageListParse(response: Response): List<Page> {
+        response.requireSourceResponse()
+        return parsePageList(response.asJsoup())
+    }
 
     private fun parsePageList(document: org.jsoup.nodes.Document): List<Page> {
-        val packedScript = document.selectFirst(PACKED_SCRIPT_SELECTOR)!!.data()
+        val packedScript = document.selectFirst(PACKED_SCRIPT_SELECTOR)?.data()
+            ?: throw IOException("Le lecteur Scan-Manga n'a pas trouvé les données du chapitre.")
         val unpackedScript = decodeHunter(packedScript)
 
         val (sml) = SML_PARAM_REGEX.find(unpackedScript)?.destructured

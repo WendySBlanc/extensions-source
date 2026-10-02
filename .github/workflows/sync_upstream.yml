@@ -1,0 +1,45 @@
+name: Sync Keiyoushi source
+
+on:
+  schedule:
+    - cron: "43 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-keiyoushi-source
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'WendySBlanc/extensions-source'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout Nova source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: main
+          token: ${{ secrets.BOT_PAT }}
+
+      - name: Merge Keiyoushi updates
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/keiyoushi/extensions-source.git
+          git fetch --no-tags upstream main
+
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Nova is already synchronized."
+            exit 0
+          fi
+
+          # Keep Nova's local fix only when both repositories changed the same lines.
+          # All non-conflicting upstream additions, migrations and deletions are applied.
+          git merge --no-edit -X ours upstream/main
+          git diff --check HEAD^ HEAD
+          git push origin HEAD:main

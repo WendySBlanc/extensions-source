@@ -6,6 +6,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.util.Base64
 import android.view.View
+import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -36,12 +37,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.CacheControl
 import okhttp3.FormBody
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
@@ -56,7 +59,6 @@ import java.time.format.DateTimeFormatter
 import java.util.Collections
 import java.util.Locale
 import kotlin.time.Duration.Companion.hours
-import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.TimeSource
@@ -67,6 +69,18 @@ abstract class Japscan :
     ConfigurableSource {
 
     private val preferences by getPreferencesLazy()
+
+    // Probe protected pages without invoking the host's hidden Cloudflare interceptor. This lets
+    // us fail over immediately instead of waiting for a hidden interactive challenge to time out.
+    private val probeClient by lazy {
+        client.newBuilder().apply {
+            interceptors().removeAll { it.javaClass.simpleName == "CloudflareInterceptor" }
+        }.build()
+    }
+
+    private val homepageFeedMutex = Mutex()
+    private var homepageFeedCachedAt = 0L
+    private var homepageFeedCache: Map<String, List<SChapter>> = emptyMap()
 
     // Pages are captured from the reader's canvases and spooled to the cache dir; their imageUrl
     // points at a sentinel host that this interceptor serves from disk, ahead of the rate limiter.
@@ -131,7 +145,13 @@ abstract class Japscan :
         fetchDetails: Boolean,
         fetchChapters: Boolean,
     ): SMangaUpdate {
-        val response = client.get(baseUrl + manga.url)
+        val response = runCatching { probeClient.get(baseUrl + manga.url) }.getOrElse { error ->
+            return getProtectedMangaUpdate(manga, chapters, error)
+        }
+        if (!response.isSuccessful || response.header("cf-mitigated") == "challenge") {
+            response.close()
+            return getProtectedMangaUpdate(manga, chapters)
+        }
         val mangaSlug = extractMangaSlug(response.request.url)
         val document = response.asJsoup()
         val details = parseMangaDetails(document).apply {
@@ -143,6 +163,96 @@ abstract class Japscan :
         }
         return SMangaUpdate(details, filterOutlierChapters(chapterList))
     }
+
+    /**
+     * Japscan protects individual title pages more aggressively than its homepage. The homepage
+     * still exposes recent chapter links, so library refreshes can discover new chapters even
+     * while a title page is behind Cloudflare. Existing chapters are retained until the user has
+     * opened Japscan in WebView once and a full refresh succeeds.
+     */
+    private suspend fun getProtectedMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        cause: Throwable? = null,
+    ): SMangaUpdate {
+        val feedKey = mangaFeedKey(manga.url)
+        val feedChapters = runCatching {
+            feedKey?.let { getHomepageChapterFeed()[it] }.orEmpty()
+        }.getOrDefault(emptyList())
+        val merged = (feedChapters + chapters).distinctBy { normalizeChapterUrl(it.url) }
+
+        if (merged.isEmpty()) {
+            throw Exception(
+                "Japscan demande une vérification. Ouvrez ce titre dans la WebView, validez-la, puis actualisez.",
+                cause,
+            )
+        }
+        return SMangaUpdate(manga, merged)
+    }
+
+    private suspend fun getHomepageChapterFeed(): Map<String, List<SChapter>> {
+        homepageFeedMutex.lock()
+        try {
+            val now = System.currentTimeMillis()
+            if (homepageFeedCache.isNotEmpty() && now - homepageFeedCachedAt < HOMEPAGE_FEED_TTL_MS) {
+                return homepageFeedCache
+            }
+
+            val response = probeClient.get("$baseUrl/", CacheControl.FORCE_NETWORK)
+            if (!response.isSuccessful || response.header("cf-mitigated") == "challenge") {
+                response.close()
+                return homepageFeedCache
+            }
+            val document = response.asJsoup()
+            val parsed = document.select("a[href]")
+                .mapNotNull(::parseHomepageChapter)
+                .groupBy { it.first }
+                .mapValues { (_, values) ->
+                    values.map { it.second }
+                        .distinctBy { normalizeChapterUrl(it.url) }
+                        .sortedByDescending { it.chapter_number }
+                }
+
+            if (parsed.isNotEmpty()) {
+                homepageFeedCache = parsed
+                homepageFeedCachedAt = now
+            }
+            return homepageFeedCache
+        } finally {
+            homepageFeedMutex.unlock()
+        }
+    }
+
+    private fun parseHomepageChapter(element: Element): Pair<String, SChapter>? {
+        val url = element.absUrl("href").toHttpUrlOrNull() ?: return null
+        if (url.host != baseUrl.toHttpUrl().host) return null
+        val segments = url.pathSegments.filter(String::isNotEmpty)
+        if (segments.size != 3 || segments[0] !in CHAPTER_PATH_TYPES) return null
+
+        val rawLabel = element.attr("title").ifBlank { element.text() }
+        val name = CHAPTER_LABEL_REGEX.find(rawLabel)?.value
+            ?: when {
+                segments[2].startsWith("volume-", ignoreCase = true) ->
+                    "Volume ${segments[2].substringAfter('-')}"
+                segments[2].toFloatOrNull() != null -> "Chapitre ${segments[2]}"
+                else -> return null
+            }
+        val path = "/${segments.joinToString("/")}/"
+        val key = "/${segments[0]}/${segments[1]}/"
+        return key to SChapter.create().apply {
+            this.url = path
+            this.name = name
+            chapter_number = CHAPTER_NUM_REGEX.find(name)?.groupValues?.get(1)?.toFloatOrNull() ?: -1f
+        }
+    }
+
+    private fun mangaFeedKey(url: String): String? {
+        val segments = url.substringBefore('?').split('/').filter(String::isNotEmpty)
+        if (segments.size < 2 || segments[0] !in CHAPTER_PATH_TYPES) return null
+        return "/${segments[0]}/${segments[1]}/"
+    }
+
+    private fun normalizeChapterUrl(url: String) = url.substringBefore('?').trimEnd('/')
 
     private fun parseMangaDetails(document: Document) = SManga.create().apply {
         val infoElement = document.selectFirst("#main .card-body")!!
@@ -288,16 +398,20 @@ abstract class Japscan :
         return jsInterface.snapshot().mapIndexed { i, path -> Page(i, imageUrl = "https://$CACHE_HOST$path") }
     }
 
-    private suspend fun captchaPresent(chapterUrl: String): Boolean = client.get(chapterUrl, CacheControl.FORCE_NETWORK).use {
-        CAPTCHA_REGEX.containsMatchIn(it.body.string())
-    }
+    private suspend fun accessGatePresent(chapterUrl: String): Boolean = runCatching {
+        probeClient.get(chapterUrl, CacheControl.FORCE_NETWORK).use { response ->
+            response.header("cf-mitigated") == "challenge" ||
+                !response.isSuccessful ||
+                CAPTCHA_REGEX.containsMatchIn(response.body.string())
+        }
+    }.getOrDefault(true)
 
     private suspend fun solveCaptcha(chapterUrl: String, isReader: Boolean) {
-        if (!captchaPresent(chapterUrl)) return
+        if (!accessGatePresent(chapterUrl)) return
 
-        // Cold sessions usually get past the captcha after loading the homepage once in a WebView
-        warmupWebViewSession()
-        if (!captchaPresent(chapterUrl)) return
+        // Let non-interactive Cloudflare checks settle before asking the user to intervene.
+        warmupWebViewSession(chapterUrl)
+        if (!accessGatePresent(chapterUrl)) return
 
         val context = applicationContext
         try {
@@ -306,16 +420,16 @@ abstract class Japscan :
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 putExtra("url_key", chapterUrl)
                 putExtra("source_key", id)
-                putExtra("title_key", "Résolvez le captcha, fermez la Webview et réouvrez le chapitre.")
+                putExtra("title_key", "Validez la vérification Japscan pour ouvrir le chapitre.")
             }
             context.startActivity(intent)
         } catch (_: Exception) {
             // Suwayomi etc.
-            throw Exception("Résolvez le captcha de ce chapitre depuis la WebView et réouvrez le chapitre.")
+            throw Exception("Validez la vérification Japscan dans la WebView puis réouvrez le chapitre.")
         }
         repeat(CAPTCHA_MAX_POLLS) {
             delay(CAPTCHA_POLL_INTERVAL)
-            if (!captchaPresent(chapterUrl)) {
+            if (!accessGatePresent(chapterUrl)) {
                 val closeIntent = Intent().apply {
                     val targetClass = if (isReader) {
                         "eu.kanade.tachiyomi.ui.reader.ReaderActivity"
@@ -329,17 +443,17 @@ abstract class Japscan :
                 return
             }
         }
-        throw Exception("Résolvez le captcha, fermez la Webview et réouvrez le chapitre.")
+        throw Exception("Validez la vérification Japscan, fermez la WebView et réouvrez le chapitre.")
     }
 
-    private suspend fun warmupWebViewSession() {
+    private suspend fun warmupWebViewSession(chapterUrl: String) {
         runCatching {
-            runWebView<Unit>(timeout = 8.seconds) {
+            runWebView<Unit>(timeout = 10.seconds) {
                 var finished = false
                 onPageFinished { finished = true }
-                // Settle window that lets Cloudflare's beacon commit cf_clearance before teardown
-                poll(200.milliseconds) { if (finished) resolve(Unit) }
-                loadUrl("$baseUrl/")
+                // Leave enough time for Cloudflare's beacon and cookie write to finish.
+                poll(3.seconds) { if (finished) resolve(Unit) }
+                loadUrl(chapterUrl, headers.toMap())
             }
         }
     }
@@ -355,6 +469,9 @@ abstract class Japscan :
         jsInterface: JsInterface,
         userAgent: String?,
     ): WebView = WebView(applicationContext).apply {
+        val cookieManager = CookieManager.getInstance()
+        cookieManager.setAcceptCookie(true)
+        cookieManager.setAcceptThirdPartyCookies(this, true)
         settings.domStorageEnabled = true
         settings.javaScriptEnabled = true
         settings.blockNetworkImage = false
@@ -499,6 +616,7 @@ abstract class Japscan :
                 """|transform:matrix\(0,0,0,0""",
         )
         private val CHAPTER_NUM_REGEX = Regex("""(?i)chapitre\s+([\d.]+)""")
+        private val CHAPTER_LABEL_REGEX = Regex("""(?i)(?:chapitre|volume)\s+[\d.]+(?:\s*:[^|]+)?""")
         private val NON_NUMBER_REGEX = Regex("[^0-9.]+")
         private val CAPTCHA_REGEX = """window\.__captcha\s*=\s*\{\s*needed\s*:\s*true\s*,?""".toRegex()
         private val DATE_FORMAT = DateTimeFormatter.ofPattern("d MMM yyyy", Locale.US)
@@ -509,6 +627,7 @@ abstract class Japscan :
 
         private const val CACHE_HOST = "japscan-cache.local"
         private const val CACHE_FILE_PREFIX = "japscan-"
+        private const val HOMEPAGE_FEED_TTL_MS = 10 * 60 * 1000L
         private val IDLE_TIMEOUT = 45.seconds
         private val CAPTCHA_POLL_INTERVAL = 5.seconds
         private const val CAPTCHA_MAX_POLLS = 15

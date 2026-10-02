@@ -16,7 +16,6 @@
 :src:en:assortedscans
 :src:en:asurascans
 :src:en:erosscans
-:src:en:firescans
 :src:en:flamecomics
 :src:en:galaxymanga
 :src:en:hivescans
@@ -70,12 +69,10 @@
 :src:fr:manganova
 :src:fr:mangascantrad
 :src:fr:mangasoriginesfr
-:src:fr:mangasscans
 :src:fr:novelfrance
 :src:fr:ono
 :src:fr:ortegascans
 :src:fr:pantheonscan
-:src:fr:perfscan
 :src:fr:phenixscansco
 :src:fr:pornhwafr
 :src:fr:poseidonscans

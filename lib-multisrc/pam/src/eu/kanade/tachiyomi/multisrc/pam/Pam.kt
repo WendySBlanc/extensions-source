@@ -73,6 +73,7 @@ abstract class Pam :
         .build()
 
     override fun headersBuilder() = super.headersBuilder()
+        .set("User-Agent", BROWSER_USER_AGENT)
         .set("Origin", "https://${baseHttpUrl.host}")
         .set("Referer", "$baseUrl/")
 
@@ -761,6 +762,9 @@ abstract class Pam :
 }
 
 private const val THUMBNAIL_FRAGMENT = "thumbnail"
+private const val BROWSER_USER_AGENT =
+    "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) " +
+        "Chrome/141.0.0.0 Mobile Safari/537.36"
 private const val ATTESTATION_ATTEMPTS = 3
 private const val MANIFEST_VERSION = 2
 private val ECE_KEY_INFO = "Content-Encoding: aes128gcm\u0000".toByteArray()

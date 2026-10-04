@@ -1,17 +1,13 @@
 package eu.kanade.tachiyomi.extension.fr.japscan
 
-import android.annotation.SuppressLint
 import android.content.ComponentName
 import android.content.Intent
-import android.graphics.Bitmap
 import android.util.Base64
 import android.view.View
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.source.ConfigurableSource
@@ -32,10 +28,6 @@ import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.runWebView
 import keiyoushi.utils.tryParseDate
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
@@ -56,12 +48,10 @@ import java.io.ByteArrayInputStream
 import java.io.File
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
-import java.util.Collections
 import java.util.Locale
 import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
-import kotlin.time.TimeSource
 
 @Source
 abstract class Japscan :
@@ -361,41 +351,28 @@ abstract class Japscan :
         }
     }
 
+    private val pageListMutex = Mutex()
+
     override suspend fun getPageList(chapter: SChapter): List<Page> {
-        // Must be read before the first suspension point, while the caller's frames are on the stack.
-        val isReader = Exception().stackTrace.any { it.className.contains("reader") }
-        val context = applicationContext
-        val chapterUrl = baseUrl + chapter.url
-        sweepPageCache(context.cacheDir)
+        pageListMutex.withLock {
+            // Must be read before the first suspension point, while the caller's frames are on the stack.
+            val isReader = Exception().stackTrace.any { it.className.contains("reader") }
+            val chapterUrl = baseUrl + chapter.url
+            sweepPageCache(applicationContext.cacheDir)
 
-        solveCaptcha(chapterUrl, isReader)
+            solveCaptcha(chapterUrl, isReader)
 
-        // manhwa/manhua use the long-strip reader, everything else the paginated one. The DOM
-        // can't tell them apart before the reader JS mounts, and both need different hooks.
-        val urlSegment = chapter.url.trimStart('/').substringBefore('/').lowercase()
-        val isWebtoon = urlSegment == "manhwa" || urlSegment == "manhua"
-        val interfaceName = randomString()
-        val jsInterface = JsInterface(context.cacheDir)
-        val userAgent = headers["User-Agent"]
+            // manhwa/manhua use the long-strip reader, everything else the paginated one. The DOM
+            // can't tell them apart before the reader JS mounts, and both need different hooks.
+            val urlSegment = chapter.url.trimStart('/').substringBefore('/').lowercase()
+            val isWebtoon = urlSegment == "manhwa" || urlSegment == "manhua"
 
-        val webView = withContext(Dispatchers.Main) {
-            createReaderWebView(chapterUrl, isWebtoon, urlSegment, interfaceName, jsInterface, userAgent)
-        }
-        try {
-            // A healthy long chapter can take minutes, but a wedged driver shouldn't burn the
-            // whole budget: give up when no page was saved for IDLE_TIMEOUT.
-            val deadline = TimeSource.Monotonic.markNow() + 3.minutes
-            while (!jsInterface.done.isCompleted && deadline.hasNotPassedNow()) {
-                withTimeoutOrNull(IDLE_TIMEOUT) { jsInterface.activity.receive() } ?: break
+            val cachedPages = runReaderWebView(chapterUrl, isWebtoon, urlSegment)
+            if (cachedPages.isEmpty()) {
+                throw Exception("Erreur lors de la récupération des pages")
             }
-        } finally {
-            withContext(NonCancellable + Dispatchers.Main) { webView.destroy() }
+            return cachedPages.mapIndexed { i, path -> Page(i, imageUrl = "https://$CACHE_HOST$path") }
         }
-
-        if (!jsInterface.done.isCompleted) {
-            throw Exception("Erreur lors de la récupération des pages")
-        }
-        return jsInterface.snapshot().mapIndexed { i, path -> Page(i, imageUrl = "https://$CACHE_HOST$path") }
     }
 
     private suspend fun accessGatePresent(chapterUrl: String): Boolean = runCatching {
@@ -458,10 +435,7 @@ abstract class Japscan :
         }
     }
 
-    // A manual WebView instead of runWebView: the long-strip reader needs a forced desktop-sized
-    // viewport, otherwise it only renders one tile per page.
-    @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
-    private fun createReaderWebView(
+    private suspend fun runReaderWebView(
         chapterUrl: String,
         isWebtoon: Boolean,
         urlSegment: String,
@@ -490,36 +464,68 @@ abstract class Japscan :
         }
         addJavascriptInterface(jsInterface, interfaceName)
 
-        webViewClient = object : WebViewClient() {
-            // The reader pulls rotating ad hosts whose modals break the detached descrambler,
-            // so only the origins the reader needs are allowed.
-            override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest): WebResourceResponse? {
-                val host = request.url.host ?: return null
-                return if (ALLOWED_HOSTS.any { host == it || host.endsWith(".$it") }) {
-                    null
-                } else {
-                    // A null body keeps some WebView builds pending, stalling the capture
-                    WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
+        val response = client.get(chapterUrl)
+
+        return runCatching {
+            runWebView<List<String>>(timeout = 3.minutes) {
+                domStorageEnabled = true
+                javaScriptEnabled = true
+                blockImages = false
+                userAgent = headers["User-Agent"]!!
+                if (isWebtoon) {
+                    useWideViewPort = true
+                    loadWithOverviewMode = false
                 }
-            }
 
-            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                super.onPageStarted(view, url, favicon)
-                view?.evaluateJavascript(ACLIB_STUB, null)
-                view?.evaluateJavascript(if (isWebtoon) webtoonHooks(interfaceName) else PAGINATED_HOOK, null)
-            }
+                jsBridge("${interfaceName}_savePage") { dataUri ->
+                    savePage(dataUri, sessionTag, savedPaths.size)?.let(savedPaths::add)
+                }
 
-            override fun onPageFinished(view: WebView?, url: String?) {
-                super.onPageFinished(view, url)
-                // Keep the detached WebView's JS timers running
-                view?.onResume()
-                view?.resumeTimers()
-                val driver = if (isWebtoon) webtoonDriver(interfaceName, urlSegment) else paginatedDriver(interfaceName)
-                view?.evaluateJavascript(driver, null)
-            }
-        }
+                jsBridge("${interfaceName}_passDone") {
+                    done = true
+                    resolve(savedPaths)
+                }
 
-        loadUrl(chapterUrl, headers.toMap())
+                // The reader pulls rotating ad hosts whose modals break the detached descrambler,
+                // so only the origins the reader needs are allowed.
+                interceptRequest { request ->
+                    val host = request.url.host ?: return@interceptRequest null
+                    if (ALLOWED_HOSTS.any { host == it || host.endsWith(".$it") }) {
+                        null
+                    } else {
+                        // A null body keeps some WebView builds pending, stalling the capture
+                        WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
+                    }
+                }
+
+                onPageStarted {
+                    evaluateJs(ACLIB_STUB)
+                    evaluateJs(if (isWebtoon) webtoonHooks(interfaceName) else PAGINATED_HOOK)
+                }
+
+                onPageFinished {
+                    evaluateJs(if (isWebtoon) webtoonDriver(interfaceName, urlSegment) else paginatedDriver(interfaceName))
+                }
+
+                loadData(chapterUrl, response.body.string())
+            }
+        }.getOrElse { emptyList() }
+            .takeIf { done } ?: emptyList()
+    }
+
+    private fun savePage(
+        dataUri: String,
+        sessionTag: String,
+        size: Int,
+    ): String? {
+        val commaIdx = dataUri.indexOf(',')
+        if (commaIdx <= 0) return null
+        return runCatching {
+            val bytes = Base64.decode(dataUri.substring(commaIdx + 1), Base64.DEFAULT)
+            val file = File(applicationContext.cacheDir, "$sessionTag-$size.bin")
+            file.writeBytes(bytes)
+            file.absolutePath
+        }.getOrNull()
     }
 
     // Spooled pages must outlive the chapter being read (the reader may re-request them or
@@ -534,43 +540,6 @@ abstract class Japscan :
     private fun randomString(length: Int = 10): String {
         val charPool = ('a'..'z') + ('A'..'Z')
         return List(length) { charPool.random() }.joinToString("")
-    }
-
-    private class JsInterface(private val cacheDir: File) {
-        val done = CompletableDeferred<Unit>()
-        val activity = Channel<Unit>(Channel.CONFLATED)
-
-        private val savedPaths: MutableList<String> = Collections.synchronizedList(mutableListOf())
-        private val sessionTag = "$CACHE_FILE_PREFIX${System.currentTimeMillis()}"
-
-        fun snapshot(): List<String> = synchronized(savedPaths) { savedPaths.toList() }
-
-        @JavascriptInterface
-        @Suppress("UNUSED")
-        fun savePage(dataUri: String) {
-            activity.trySend(Unit)
-            val commaIdx = dataUri.indexOf(',')
-            if (commaIdx <= 0) return
-            runCatching {
-                val bytes = Base64.decode(dataUri.substring(commaIdx + 1), Base64.DEFAULT)
-                synchronized(savedPaths) {
-                    val file = File(cacheDir, "$sessionTag-${savedPaths.size}.bin")
-                    file.writeBytes(bytes)
-                    savedPaths.add(file.absolutePath)
-                }
-            }
-        }
-
-        @JavascriptInterface
-        @Suppress("UNUSED")
-        fun log(message: String) {}
-
-        @JavascriptInterface
-        @Suppress("UNUSED")
-        fun passDone() {
-            done.complete(Unit)
-            activity.trySend(Unit)
-        }
     }
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {

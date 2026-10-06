@@ -68,12 +68,11 @@ abstract class Pam :
         classLoader = this::class.java.classLoader!!,
     )
 
-    override val client = network.client.newBuilder()
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = this
         .addInterceptor(::imageInterceptor)
         .rateLimit(1, 2.seconds) { it.fragment != THUMBNAIL_FRAGMENT }
-        .build()
 
-    override fun headersBuilder() = super.headersBuilder()
+    override fun Headers.Builder.configureHeaders(): Headers.Builder = this
         .set("User-Agent", BROWSER_USER_AGENT)
         .set("Origin", "https://${baseHttpUrl.host}")
         .set("Referer", "$baseUrl/")

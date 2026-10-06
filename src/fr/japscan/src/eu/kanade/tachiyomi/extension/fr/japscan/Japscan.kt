@@ -3,10 +3,6 @@ package eu.kanade.tachiyomi.extension.fr.japscan
 import android.content.ComponentName
 import android.content.Intent
 import android.util.Base64
-import android.view.View
-import android.webkit.CookieManager
-import android.webkit.JavascriptInterface
-import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
@@ -30,8 +26,7 @@ import keiyoushi.utils.runWebView
 import keiyoushi.utils.tryParseDate
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.sync.withLock
 import okhttp3.CacheControl
 import okhttp3.FormBody
 import okhttp3.HttpUrl
@@ -439,30 +434,11 @@ abstract class Japscan :
         chapterUrl: String,
         isWebtoon: Boolean,
         urlSegment: String,
-        interfaceName: String,
-        jsInterface: JsInterface,
-        userAgent: String?,
-    ): WebView = WebView(applicationContext).apply {
-        val cookieManager = CookieManager.getInstance()
-        cookieManager.setAcceptCookie(true)
-        cookieManager.setAcceptThirdPartyCookies(this, true)
-        settings.domStorageEnabled = true
-        settings.javaScriptEnabled = true
-        settings.blockNetworkImage = false
-        // Keep the UA matched to the rest of the traffic so Cloudflare doesn't challenge again;
-        // the desktop appearance the descrambler needs is faked at the JS layer.
-        settings.userAgentString = userAgent
-        setLayerType(View.LAYER_TYPE_SOFTWARE, null)
-        if (isWebtoon) {
-            settings.useWideViewPort = true
-            settings.loadWithOverviewMode = false
-            measure(
-                View.MeasureSpec.makeMeasureSpec(WEBVIEW_VIEWPORT_WIDTH, View.MeasureSpec.EXACTLY),
-                View.MeasureSpec.makeMeasureSpec(WEBVIEW_VIEWPORT_HEIGHT, View.MeasureSpec.EXACTLY),
-            )
-            layout(0, 0, WEBVIEW_VIEWPORT_WIDTH, WEBVIEW_VIEWPORT_HEIGHT)
-        }
-        addJavascriptInterface(jsInterface, interfaceName)
+    ): List<String> {
+        val interfaceName = randomString()
+        val sessionTag = "$CACHE_FILE_PREFIX${System.currentTimeMillis()}"
+        val savedPaths = mutableListOf<String>()
+        var done = false
 
         val response = client.get(chapterUrl)
 

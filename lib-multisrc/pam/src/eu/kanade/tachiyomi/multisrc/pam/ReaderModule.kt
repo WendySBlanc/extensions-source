@@ -29,7 +29,19 @@ internal class Unmask(
     val permutation: IntArray,
     val xor: IntArray,
     val add: IntArray,
+    val rotate: IntArray? = null,
+    val operation: IntArray? = null,
+    val rounds: Int = 1,
+    val reverse: Boolean = false,
+    val feedback: UnmaskFeedback = UnmaskFeedback.NONE,
+    val feedbackSeed: Int = 0,
 )
+
+internal enum class UnmaskFeedback {
+    NONE,
+    XOR,
+    ADD_ROTATE_ONE,
+}
 
 internal suspend fun OkHttpClient.fetchReaderModule(baseUrl: String, headers: Headers): ReaderModule {
     suspend fun asset(name: String): String = get("$baseUrl/build/assets/$name", headers).use { it.body.string() }
@@ -77,18 +89,30 @@ internal suspend fun OkHttpClient.fetchReaderModule(baseUrl: String, headers: He
         ?: throw IOException("Unsupported reader signer build")
 
     // Builds ship one or more unmask imports, each with its own loop shape and table order.
-    val unmasks = UNMASK_REGEX.findAll(glue).associate { match ->
-        val groups = match.groupValues
-        val tables = mapOf(groups[3] to groups[4], groups[5] to groups[6], groups[7] to groups[8])
-            .mapValues { (_, values) -> values.split(',').map(String::toInt).toIntArray() }
-        if (tables.size != 3 || tables.values.any { it.size != UNMASK_SIZE }) {
-            throw IOException("Unsupported reader signer build")
+    val unmasks = buildMap {
+        UNMASK_REGEX.findAll(glue).forEach { match ->
+            val groups = match.groupValues
+            val tables = mapOf(groups[3] to groups[4], groups[5] to groups[6], groups[7] to groups[8])
+                .mapValues { (_, values) -> values.split(',').map(String::toInt).toIntArray() }
+            if (tables.size != 3 || tables.values.any { it.size != UNMASK_SIZE }) {
+                throw IOException("Unsupported reader signer build")
+            }
+            put(
+                importModule to groups[1],
+                Unmask(
+                    permutation = tables[groups[11]] ?: throw IOException("Unsupported reader signer build"),
+                    xor = tables[groups[12]] ?: throw IOException("Unsupported reader signer build"),
+                    add = tables[groups[13]] ?: throw IOException("Unsupported reader signer build"),
+                ),
+            )
         }
-        (importModule to groups[1]) to Unmask(
-            permutation = tables[groups[11]] ?: throw IOException("Unsupported reader signer build"),
-            xor = tables[groups[12]] ?: throw IOException("Unsupported reader signer build"),
-            add = tables[groups[13]] ?: throw IOException("Unsupported reader signer build"),
-        )
+
+        ADVANCED_UNMASK_FUNCTION_REGEX.findAll(glue).forEach { match ->
+            val name = match.groupValues[1]
+            val pointer = match.groupValues[2]
+            val body = match.groupValues[3]
+            put(importModule to name, parseAdvancedUnmask(pointer, body))
+        }
     }
     if (unmasks.isEmpty()) throw IOException("Unsupported reader signer build")
 
@@ -99,6 +123,93 @@ internal suspend fun OkHttpClient.fetchReaderModule(baseUrl: String, headers: He
         exports = exports,
         resizeImport = importModule to resizeName,
         unmaskImports = unmasks,
+    )
+}
+
+private fun parseAdvancedUnmask(pointer: String, body: String): Unmask {
+    fun unsupported(): Nothing = throw IOException("Unsupported reader signer build")
+
+    val tables = ADVANCED_TABLE_REGEX.findAll(body).associate { match ->
+        match.groupValues[1] to match.groupValues[2].split(',').map(String::toInt).toIntArray()
+    }
+    if (tables.size != 5 || tables.values.any { it.size != UNMASK_SIZE }) unsupported()
+
+    val roundsMatch = ADVANCED_ROUNDS_REGEX.find(body) ?: unsupported()
+    if (roundsMatch.groupValues[1] != roundsMatch.groupValues[3] || roundsMatch.groupValues[1] != roundsMatch.groupValues[4]) unsupported()
+    val rounds = roundsMatch.groupValues[2].toInt().takeIf { it in 1..16 } ?: unsupported()
+
+    val escapedPointer = Regex.escape(pointer)
+    val loop = Regex(
+        """for\(var ([\w$]+)=([\w$]+)\.slice\($escapedPointer,$escapedPointer\+64\),([\w$]+)=(\d+),([\w$]+)=(\d+);([^;]+);([\w$]+)(\+\+|--)\)\{""",
+    ).find(body) ?: unsupported()
+    val block = loop.groupValues[1]
+    val memory = loop.groupValues[2]
+    val feedbackVariable = loop.groupValues[3]
+    val feedbackSeed = loop.groupValues[4].toInt()
+    val index = loop.groupValues[5]
+    val start = loop.groupValues[6].toInt()
+    val condition = loop.groupValues[7]
+    if (index != loop.groupValues[8]) unsupported()
+    val reverse = when {
+        start == 0 && condition == "$UNMASK_SIZE>$index" && loop.groupValues[9] == "++" -> false
+        start == UNMASK_SIZE - 1 && condition == "0<=$index" && loop.groupValues[9] == "--" -> true
+        else -> unsupported()
+    }
+
+    val escapedBlock = Regex.escape(block)
+    val escapedIndex = Regex.escape(index)
+    val inputMatch = Regex("""var ([\w$]+)=$escapedBlock\[([\w$]+)\[$escapedIndex\]\]""").find(body) ?: unsupported()
+    val input = inputMatch.groupValues[1]
+    val permutationName = inputMatch.groupValues[2]
+    val escapedInput = Regex.escape(input)
+
+    fun tableName(pattern: String): String = Regex(pattern).find(body)?.groupValues?.get(1) ?: unsupported()
+
+    val operationName = tableName("""0==([\w$]+)\[$escapedIndex\]""")
+    val xorName = tableName("""\($escapedInput\^([\w$]+)\[$escapedIndex\]\)""")
+    val addName = tableName("""\)\+([\w$]+)\[$escapedIndex\]&255""")
+    val rotateName = tableName("""$escapedInput<<([\w$]+)\[$escapedIndex\]""")
+
+    val escapedOperationName = Regex.escape(operationName)
+    val escapedXorName = Regex.escape(xorName)
+    val escapedAddName = Regex.escape(addName)
+    val escapedRotateName = Regex.escape(rotateName)
+    val operationExpression = """0==$escapedOperationName\[$escapedIndex\]\?\($escapedInput\^$escapedXorName\[$escapedIndex\]\)\+$escapedAddName\[$escapedIndex\]&255:1==$escapedOperationName\[$escapedIndex\]\?$escapedInput\+$escapedAddName\[$escapedIndex\]&255\^$escapedXorName\[$escapedIndex\]:255&\($escapedInput<<$escapedRotateName\[$escapedIndex\]\|$escapedInput>>8-$escapedRotateName\[$escapedIndex\]\)\^$escapedXorName\[$escapedIndex\]"""
+    if (!Regex(operationExpression).containsMatchIn(body)) unsupported()
+    if (!body.contains("$memory[$pointer+$index]=$feedbackVariable")) unsupported()
+
+    val feedback = when {
+        body.contains("$feedbackVariable^=") -> UnmaskFeedback.XOR
+        body.contains("255&($feedbackVariable<<1|$feedbackVariable>>7)") -> UnmaskFeedback.ADD_ROTATE_ONE
+        else -> unsupported()
+    }
+
+    val permutation = tables[permutationName] ?: unsupported()
+    val xor = tables[xorName] ?: unsupported()
+    val add = tables[addName] ?: unsupported()
+    val rotate = tables[rotateName] ?: unsupported()
+    val operation = tables[operationName] ?: unsupported()
+    if (
+        permutation.toSet() != (0 until UNMASK_SIZE).toSet() ||
+        xor.any { it !in 0..0xFF } ||
+        add.any { it !in 0..0xFF } ||
+        rotate.any { it !in 1..7 } ||
+        operation.any { it !in 0..2 } ||
+        feedbackSeed !in 0..0xFF
+    ) {
+        unsupported()
+    }
+
+    return Unmask(
+        permutation = permutation,
+        xor = xor,
+        add = add,
+        rotate = rotate,
+        operation = operation,
+        rounds = rounds,
+        reverse = reverse,
+        feedback = feedback,
+        feedbackSeed = feedbackSeed,
     )
 }
 
@@ -126,4 +237,11 @@ private val RESIZE_IMPORT_REGEX = Regex(
 private val UNMASK_REGEX = Regex(
     """([\w$]+):function\(([\w$]+)\)\{(?:for\()?var ([\w$]+)=\[([\d,]+)\],([\w$]+)=\[([\d,]+)\],([\w$]+)=\[([\d,]+)\],([\w$]+)=[\w$]+\.slice\(\2,\2\+64\)[^}]*?[\w$]+\[\2\+([\w$]+)\]=\(\9\[([\w$]+)\[\10\]\]\^([\w$]+)\[\10\]\)\+([\w$]+)\[\10\]&255""",
 )
+
+// Newer builds use five tables, multiple rounds and feedback between bytes.
+private val ADVANCED_UNMASK_FUNCTION_REGEX = Regex(
+    """([\w$]+):function\(([\w$]+)\)\{(for\(var [\s\S]*?\.slice\([\w$]+,[\w$]+\+64\)[\s\S]*?)\}\}""",
+)
+private val ADVANCED_TABLE_REGEX = Regex("""(?:for\(var |,)([\w$]+)=\[([\d,]+)\]""")
+private val ADVANCED_ROUNDS_REGEX = Regex(""",([\w$]+)=0;(\d+)>([\w$]+);([\w$]+)\+\+\)for\(""")
 private val WASM_REGEX = Regex(""""(AGFzbQ[A-Za-z0-9+/=]+)"""")

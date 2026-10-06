@@ -50,12 +50,35 @@ internal class Signer(private val reader: ReaderModule) {
     }
 
     private fun Memory.unmask(ptr: Int, unmask: Unmask) {
-        val block = readBytes(ptr, UNMASK_SIZE)
-        val out = ByteArray(UNMASK_SIZE) { i ->
-            ((block[unmask.permutation[i]].toInt() and 0xFF xor unmask.xor[i]) + unmask.add[i]).toByte()
+        repeat(unmask.rounds) {
+            val block = readBytes(ptr, UNMASK_SIZE)
+            val out = ByteArray(UNMASK_SIZE)
+            var feedback = unmask.feedbackSeed
+            val indices = if (unmask.reverse) (UNMASK_SIZE - 1 downTo 0) else (0 until UNMASK_SIZE)
+            for (i in indices) {
+                val input = block[unmask.permutation[i]].toInt() and 0xFF
+                val transformed = unmask.operation?.let { operation ->
+                    when (operation[i]) {
+                        0 -> ((input xor unmask.xor[i]) + unmask.add[i]) and 0xFF
+                        1 -> (((input + unmask.add[i]) and 0xFF) xor unmask.xor[i]) and 0xFF
+                        2 -> (rotateLeft(input, unmask.rotate?.get(i) ?: 0) xor unmask.xor[i]) and 0xFF
+                        else -> throw IOException("Unsupported reader signer build")
+                    }
+                } ?: (((input xor unmask.xor[i]) + unmask.add[i]) and 0xFF)
+
+                val value = when (unmask.feedback) {
+                    UnmaskFeedback.NONE -> transformed
+                    UnmaskFeedback.XOR -> feedback xor transformed
+                    UnmaskFeedback.ADD_ROTATE_ONE -> (transformed + rotateLeft(feedback, 1)) and 0xFF
+                }
+                feedback = value
+                out[i] = value.toByte()
+            }
+            write(ptr, out)
         }
-        write(ptr, out)
     }
+
+    private fun rotateLeft(value: Int, bits: Int): Int = ((value shl bits) or (value ushr (8 - bits))) and 0xFF
 
     fun signAttestation(challenge: String, payload: String): String {
         val c = challenge.toByteArray()

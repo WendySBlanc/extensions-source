@@ -296,7 +296,7 @@ def restrict_to_selected_modules(
 
 def main() -> None:
     _, ref = sys.argv
-    modules, deleted, lint_modules = get_module_list(ref)
+    modules, deleted, lint_modules, is_full_rebuild = get_module_list(ref)
     modules, deleted = restrict_to_selected_modules(ref, modules, deleted)
 
     matrix = create_matrix(modules)

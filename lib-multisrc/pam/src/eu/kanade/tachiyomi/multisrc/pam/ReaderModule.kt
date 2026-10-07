@@ -24,7 +24,11 @@ internal class ReaderModule(
     fun export(name: String): String = exports[name] ?: throw IOException("Reader export $name missing")
 }
 
-/** Rewrites a 64-byte block in place: out[i] = (in[permutation[i]] ^ xor[i]) + add[i]. */
+/**
+ * Rewrites a 64-byte block in place. Each step picks a byte through [permutation] and folds a
+ * table-driven value into a running byte; the tables, the fold and the loop shape are reshuffled
+ * per build, so all of it is read from the site's glue.
+ */
 internal class Unmask(
     val permutation: IntArray,
     val xor: IntArray,
@@ -232,9 +236,10 @@ private val RESIZE_IMPORT_REGEX = Regex(
     """([\w$]+)=\{([\w$]+):[\w$]+=>\{var [\w$]+=[\w$]+\.length;if\(\d+<\([\w$]+>>>=0\)\)return!1""",
 )
 
-// name:function(p){var a=[..],b=[..],c=[..],q=mem.slice(p,p+64) ... mem[p+i]=(q[perm[i]]^xor[i])+add[i]&255
+// name:function(p){for(var a=[..],b=[..],c=[..],d=[..],e=[..],f=0;n>f;f++)for(var
+//   g=mem.slice(p,p+64),h=seed,i=start;cond;i++){var j=g[a[i]];h<fold>,mem[p+i]=h
 private val UNMASK_REGEX = Regex(
-    """([\w$]+):function\(([\w$]+)\)\{(?:for\()?var ([\w$]+)=\[([\d,]+)\],([\w$]+)=\[([\d,]+)\],([\w$]+)=\[([\d,]+)\],([\w$]+)=[\w$]+\.slice\(\2,\2\+64\)[^}]*?[\w$]+\[\2\+([\w$]+)\]=\(\9\[([\w$]+)\[\10\]\]\^([\w$]+)\[\10\]\)\+([\w$]+)\[\10\]&255""",
+    """([\w$]+):function\(([\w$]+)\)\{for\(var ([\w$]+)=\[([\d,]+)\],([\w$]+)=\[([\d,]+)\],([\w$]+)=\[([\d,]+)\],([\w$]+)=\[([\d,]+)\],([\w$]+)=\[([\d,]+)\],[\w$]+=0;(\d+)>[\w$]+;[\w$]+\+\+\)for\(var ([\w$]+)=[\w$]+\.slice\(([\w$]+),([\w$]+)\+64\),([\w$]+)=(\d+),([\w$]+)=(\d+);([^;]+);([\w$]+)(\+\+|--)\)\{var [\w$]+=([\w$]+)\[([\w$]+)\[([\w$]+)\]\];([^,]*)""",
 )
 
 // Newer builds use five tables, multiple rounds and feedback between bytes.

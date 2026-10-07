@@ -62,7 +62,7 @@ internal class Signer(private val reader: ReaderModule) {
                         0 -> ((input xor unmask.xor[i]) + unmask.add[i]) and 0xFF
                         1 -> (((input + unmask.add[i]) and 0xFF) xor unmask.xor[i]) and 0xFF
                         2 -> (rotateLeft(input, unmask.rotate?.get(i) ?: 0) xor unmask.xor[i]) and 0xFF
-                        else -> throw IOException("Unsupported reader signer build")
+                        else -> throw IOException("Unsupported reader signer build (operation ${operation[i]})")
                     }
                 } ?: (((input xor unmask.xor[i]) + unmask.add[i]) and 0xFF)
 

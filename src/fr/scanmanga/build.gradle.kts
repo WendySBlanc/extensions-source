@@ -14,4 +14,10 @@ keiyoushi {
         baseUrl = "https://m.scan-manga.com"
         lang = "fr"
     }
+
+    deeplink {
+        host("m.scan-manga.com")
+        host("www.scan-manga.com")
+        path("/..*/..*\\.html")
+    }
 }

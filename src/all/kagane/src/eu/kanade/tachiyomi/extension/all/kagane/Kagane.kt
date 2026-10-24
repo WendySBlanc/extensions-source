@@ -45,7 +45,7 @@ abstract class Kagane :
     ConfigurableSource {
 
     private val kaganeLangs: List<String>
-        get() = if (lang == "zh") listOf("zh-Hans", "zh-Hant") else listOf(lang)
+        get() = listOf(lang)
 
     private val domain get() = baseUrl.removePrefix("https://")
     private val apiUrl get() = "https://$domain/api/v2"
@@ -101,6 +101,7 @@ abstract class Kagane :
         FilterList(
             SortFilter(Filter.Sort.Selection(1, false)),
             ContentRatingFilter(contentRating.toSet()),
+            FormatFilter(excludedFormats),
             GenresFilter(emptyList(), excludedGenreIds),
 
         ),
@@ -114,6 +115,7 @@ abstract class Kagane :
         FilterList(
             SortFilter(Filter.Sort.Selection(6, false)),
             ContentRatingFilter(contentRating.toSet()),
+            FormatFilter(excludedFormats),
             GenresFilter(emptyList(), excludedGenreIds),
         ),
     )
@@ -201,6 +203,9 @@ abstract class Kagane :
                     }
 
                     is SourcesFilter -> {
+                        if (filter.state.count { it.state } > MAX_SOURCE_FILTER) {
+                            throw Exception("Select at most $MAX_SOURCE_FILTER sources in the Sources filter")
+                        }
                         filter.addToJsonObject(this)
                     }
 
@@ -264,31 +269,41 @@ abstract class Kagane :
         fetchChapters: Boolean,
     ): SMangaUpdate {
         val seriesId = manga.url
-        val dto = getMangaById(seriesId)
 
-        val updatedManga = parseMangaDetails(dto).apply {
-            if (!dto.trackerId.isNullOrEmpty()) {
-                memo = buildJsonObject {
-                    put("trackerId", dto.trackerId)
+        val updatedManga = if (fetchDetails) {
+            val dto = getMangaById(seriesId)
+            parseMangaDetails(dto).apply {
+                if (!dto.trackerId.isNullOrEmpty()) {
+                    memo = buildJsonObject {
+                        put("trackerId", dto.trackerId)
+                    }
                 }
             }
+        } else {
+            manga
         }
-        val updatedChapters = parseChapterList(dto, seriesId)
+        val updatedChapters = if (fetchChapters) {
+            val index = client.get("$apiUrl/series/$seriesId/books/index?fields=List")
+                .parseAs<BookIndexDto>()
+            parseChapterList(index.toBooks(), updatedManga.genre?.substringBefore(", "), seriesId)
+        } else {
+            chapters
+        }
 
         return SMangaUpdate(updatedManga, updatedChapters)
     }
 
-    private fun parseChapterList(details: DetailsDto, seriesId: String): List<SChapter> {
-        val useSourceChapterNumber = details.format in setOf(
+    private fun parseChapterList(books: List<ChapterDto.Book>, format: String?, seriesId: String): List<SChapter> {
+        val useSourceChapterNumber = format in setOf(
             "Dark Horse Comics",
             "Flame Comics",
             "MangaDex",
             "Square Enix Manga",
         )
 
-        return details.seriesBooks.map { book ->
+        return books.sortedByDescending { it.number }.map { book ->
             book.toSChapter(seriesId, useSourceChapterNumber, chapterTitleMode)
-        }.reversed()
+        }
     }
 
     override fun getChapterUrl(chapter: SChapter): String = "$baseUrl${chapter.url}"
@@ -382,6 +397,9 @@ abstract class Kagane :
     private val excludedGenreIds: Set<String>
         get() = prefs.getStringSet(GENRES_ID_PREF, emptySet()) ?: emptySet()
 
+    private val excludedFormats: Set<String>
+        get() = prefs.getStringSet(FORMATS_PREF, emptySet()) ?: emptySet()
+
     private val sourceDisplayMode: String
         get() = prefs.getString(SOURCE_DISPLAY_MODE, SOURCE_DISPLAY_MODE_DEFAULT) ?: SOURCE_DISPLAY_MODE_DEFAULT
 
@@ -429,6 +447,21 @@ abstract class Kagane :
                 @Suppress("UNCHECKED_CAST")
                 val selected = values as Set<String>
                 this.summary = selected.mapNotNull { genreMap[it] }.joinToString()
+                true
+            }
+        }.let(screen::addPreference)
+
+        MultiSelectListPreference(screen.context).apply {
+            key = FORMATS_PREF
+            title = "Exclude Formats"
+            entries = FORMAT_OPTIONS.toTypedArray()
+            entryValues = FORMAT_OPTIONS.toTypedArray()
+            summary = FORMAT_OPTIONS.filter { it in excludedFormats }.joinToString()
+            setDefaultValue(emptySet<String>())
+            setOnPreferenceChangeListener { _, values ->
+                @Suppress("UNCHECKED_CAST")
+                val selected = values as Set<String>
+                this.summary = FORMAT_OPTIONS.filter { it in selected }.joinToString()
                 true
             }
         }.let(screen::addPreference)
@@ -488,6 +521,7 @@ abstract class Kagane :
     // ============================= Utilities ==============================
 
     companion object {
+        private const val MAX_SOURCE_FILTER = 50
         private const val CONTENT_RATING = "pref_content_rating"
         private const val CONTENT_RATING_DEFAULT = "pornographic"
         internal val CONTENT_RATINGS = arrayOf(
@@ -498,6 +532,7 @@ abstract class Kagane :
         )
 
         private const val GENRES_ID_PREF = "pref_genre_id_exclude"
+        private const val FORMATS_PREF = "pref_format_exclude"
 
         private const val SOURCE_DISPLAY_MODE = "pref_source_display_mode"
         private const val SOURCE_DISPLAY_MODE_DEFAULT = "all"
@@ -573,7 +608,7 @@ abstract class Kagane :
         val filters = mutableListOf(
             SortFilter(),
             ContentRatingFilter(contentRating.toSet()),
-            FormatFilter(),
+            FormatFilter(excludedFormats),
             PublicationStatusFilter(),
             Filter.Separator(),
         )

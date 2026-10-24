@@ -11,7 +11,7 @@ dependencies {
 
 keiyoushi {
     name = "MoeTruyen"
-    versionCode = 18
+    versionCode = 20
     contentWarning = ContentWarning.MIXED
     libVersion = "1.6"
 

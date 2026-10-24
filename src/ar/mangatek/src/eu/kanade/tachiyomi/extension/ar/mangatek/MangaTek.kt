@@ -11,8 +11,12 @@ import keiyoushi.network.get
 import keiyoushi.network.post
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
+import keiyoushi.utils.aesDecrypt
+import keiyoushi.utils.aesGcm
 import keiyoushi.utils.asJsoup
+import keiyoushi.utils.decodeHex
 import keiyoushi.utils.parseAs
+import keiyoushi.utils.sha256
 import keiyoushi.utils.toJsonRequestBody
 import keiyoushi.utils.toJsonString
 import kotlinx.serialization.json.JsonArray
@@ -27,10 +31,6 @@ import okhttp3.OkHttpClient
 import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import java.security.MessageDigest
-import javax.crypto.Cipher
-import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.spec.SecretKeySpec
 
 @Source
 abstract class MangaTek : KeiSource() {
@@ -199,7 +199,7 @@ abstract class MangaTek : KeiSource() {
     }
 
     private suspend fun unlockOverlay(chapterId: Long, unlockToken: String): Pair<OverlayData, Int?>? {
-        val proof = "$UNLOCK_PROOF_SALT|$unlockToken|$chapterId".sha256Hex()
+        val proof = "$UNLOCK_PROOF_SALT|$unlockToken|$chapterId".sha256().toHexString()
         val payload = buildJsonObject {
             put("chapterId", chapterId)
             put("token", unlockToken)
@@ -216,10 +216,6 @@ abstract class MangaTek : KeiSource() {
         return overlayData to unlockResponse.overlayPageOffset
     }
 
-    private fun String.sha256Hex(): String = MessageDigest.getInstance("SHA-256")
-        .digest(toByteArray(Charsets.UTF_8))
-        .joinToString("") { "%02x".format(it) }
-
     private fun Element.imgAttr(): String = when {
         hasAttr("data-src") -> attr("abs:data-src")
         hasAttr("data-url") -> attr("abs:data-url")
@@ -231,32 +227,19 @@ abstract class MangaTek : KeiSource() {
 
     // decrypt
 
-    private fun String.hexToBytes(): ByteArray {
-        require(length % 2 == 0) { "Invalid hex string length" }
-
-        return ByteArray(length / 2) { index ->
-            substring(index * 2, index * 2 + 2).toInt(16).toByte()
-        }
-    }
-
     private fun decrypt(blob: String, keyHex: String = KEY): OverlayData {
         val (ivHex, ctHex, tagHex) = blob.split(":").also {
             require(it.size == 3) { "unexpected overlayBlob format" }
         }
 
-        val iv = ivHex.hexToBytes()
-        val ciphertext = ctHex.hexToBytes()
-        val tag = tagHex.hexToBytes()
+        val iv = ivHex.decodeHex()
+        val ciphertext = ctHex.decodeHex()
+        val tag = tagHex.decodeHex()
 
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
-            init(
-                Cipher.DECRYPT_MODE,
-                SecretKeySpec(keyHex.hexToBytes(), "AES"),
-                GCMParameterSpec(tag.size * 8, iv),
-            )
-        }
-
-        return String(cipher.doFinal(ciphertext + tag), Charsets.UTF_8).parseAs<OverlayData>()
+        return (ciphertext + tag)
+            .aesDecrypt(aesGcm(keyHex.decodeHex(), iv, tagLength = tag.size * 8))
+            .decodeToString()
+            .parseAs<OverlayData>()
     }
 
     companion object {

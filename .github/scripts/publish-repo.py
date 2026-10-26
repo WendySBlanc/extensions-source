@@ -85,14 +85,16 @@ for info_file in ARTIFACTS_DIR.glob("**/keiyoushi-source-info.json"):
     with info_file.open(encoding="utf-8") as f:
         info = json.load(f)
     package_name = info["packageName"]
-    apk = next((info_file.parent / "outputs/apk/release").glob("*.apk"), None)
-    if apk is None:
+    package_suffix = package_name.removeprefix("eu.kanade.tachiyomi.extension.")
+    asset_stem = f"tachiyomi-{package_suffix}-v{info['versionName']}"
+    apk = info_file.parent / "outputs/apk/release" / f"{asset_stem}.apk"
+    if not apk.is_file():
         raise FileNotFoundError(
             f"{package_name}: no release apk found under {info_file.parent}"
         )
 
-    jar = next((info_file.parent / "outputs/jar/release").glob("*.jar"), None)
-    if jar is None:
+    jar = info_file.parent / "outputs/jar/release" / f"{asset_stem}.jar"
+    if not jar.is_file():
         raise FileNotFoundError(
             f"{package_name}: no release jar found under {info_file.parent}"
         )

@@ -33,13 +33,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.Response
-import org.jsoup.Jsoup
-import rx.Observable
-import java.io.IOException
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
+import org.jsoup.nodes.Document
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
@@ -49,12 +43,9 @@ abstract class ScanManga :
     KeiSource(),
     ConfigurableSource {
 
-    private val domain = baseUrl.toHttpUrl().host
-    private val rootDomain = baseUrl.toHttpUrl().topPrivateDomain() ?: domain
-    private val baseImageUrl = "https://static.$rootDomain/img/manga"
-    private val baseSearchUrl = "https://bqj.$rootDomain/search/quick.json"
-
-    override val supportsLatest = true
+    private val domain get() = baseUrl.toHttpUrl().topPrivateDomain()!!
+    private val baseImageUrl get() = "https://static.$domain/img/manga"
+    private val baseSearchUrl get() = "https://bqj.$domain/search/quick.json"
 
     private val preferences by getPreferencesLazy()
 
@@ -70,27 +61,16 @@ abstract class ScanManga :
 
     override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = addNetworkInterceptor(stripEmptyXRequestedWith)
 
-    // Reader-page fetches retain the shared cache, DNS and cookies. Explicit request headers
-    // already provide the user agent, so application interceptors can be cleared without
-    // inspecting their runtime classes. This also avoids host-specific getClass() crashes.
+    // Reader requests keep the shared cache, DNS and cookies. Their explicit headers already
+    // carry the required user agent, so application interceptors can be removed without
+    // inspecting runtime classes from another class loader.
     private val readerClient: OkHttpClient by lazy {
         client.newBuilder()
             .apply { interceptors().clear() }
             .build()
     }
 
-    private fun Response.requireSourceResponse() {
-        if (!isSuccessful) {
-            throw IOException("Scan-Manga est indisponible (HTTP $code). Réessayez plus tard ou ouvrez la WebView.")
-        }
-    }
-
-    override fun headersBuilder(): Headers.Builder = super.headersBuilder()
-        .add("upgrade-insecure-requests", "1")
-        .add(
-            "accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-        )
+    override fun Headers.Builder.configureHeaders(): Headers.Builder = add("upgrade-insecure-requests", "1")
         .add("sec-fetch-site", "none")
         .add("accept-language", "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7")
         .add("X-Requested-With", "")
@@ -105,9 +85,9 @@ abstract class ScanManga :
             )
             .build()
 
-    override fun popularMangaParse(response: Response): MangasPage {
-        response.requireSourceResponse()
-        val mangas = response.asJsoup().select("#carouselTOPContainer > div.top").map { element ->
+    // Popular
+    override suspend fun getPopularManga(page: Int): MangasPage {
+        val mangas = client.get("$baseUrl/TOP-Manga-Webtoon-47.html").asJsoup().select("#carouselTOPContainer div.top").map { element ->
             SManga.create().apply {
                 val titleElement = element.selectFirst("a.atop")!!
 
@@ -121,13 +101,8 @@ abstract class ScanManga :
     }
 
     // Latest
-    override fun latestUpdatesRequest(page: Int): Request = GET(baseUrl, headers)
-
-    override fun latestUpdatesParse(response: Response): MangasPage {
-        response.requireSourceResponse()
-        val document = response.asJsoup()
-
-        val mangas = document.select("#content_news .publi").map { element ->
+    override suspend fun getLatestUpdates(page: Int): MangasPage {
+        val mangas = client.get(baseUrl).asJsoup().select("#content_news .publi").map { element ->
             SManga.create().apply {
                 val mangaElement = element.selectFirst("a.l_manga")!!
 
@@ -159,18 +134,9 @@ abstract class ScanManga :
             .add("Content-type", "application/json; charset=UTF-8")
             .build()
 
-        return GET(url, newHeaders)
-    }
-
-    override fun searchMangaParse(response: Response): MangasPage {
-        response.requireSourceResponse()
-        val json = response.body.string()
-        if (json == "[]") {
-            return MangasPage(emptyList(), false)
-        }
-
-        return MangasPage(
-            json.parseAs<MangaSearchDto>().title?.map {
+        // No results come back as `[]` instead of an object
+        val mangas = client.get(url, searchHeaders).parseAs<MangaSearchDto> { if (it == "[]") """{"title":null}""" else it }
+            .title?.map {
                 SManga.create().apply {
                     title = it.nomMatch
                     setUrlWithoutDomain(it.url)
@@ -196,25 +162,16 @@ abstract class ScanManga :
         )
     }
 
-    // Details
-    override fun mangaDetailsParse(response: Response): SManga {
-        response.requireSourceResponse()
-        val document = response.asJsoup()
-
-        return SManga.create().apply {
-            title = document.select("h1.main_title[itemprop=name]").text()
-            author = document.select("div[itemprop=author]").text()
-            description = document.selectFirst("div.titres_desc[itemprop=description]")?.text()
-            genre = document.selectFirst("div.titres_souspart span[itemprop=genre]")?.text()
-
-            val statutText = document.selectFirst("div.titres_souspart")?.ownText()
-            status = when {
-                statutText?.contains("En cours", ignoreCase = true) == true -> SManga.ONGOING
-                statutText?.contains("Terminé", ignoreCase = true) == true -> SManga.COMPLETED
-                else -> SManga.UNKNOWN
-            }
-
-            thumbnail_url = document.select("div.full_img_serie img[itemprop=image]").attr("src")
+    private fun mangaDetailsParse(document: Document): SManga = SManga.create().apply {
+        title = document.selectFirst("meta[itemprop=name]")!!.attr("content")
+        // The itemprop div only holds the "Auteur/Artiste" label
+        author = document.selectFirst("div[itemprop=author]")?.parent()?.ownTextOrNull()
+        description = document.selectFirst("div.titres_desc[itemprop=description]")?.text()
+        genre = document.selectFirst("span[itemprop=genre]")?.let { demo ->
+            (listOf(demo.text()) + demo.parent()?.ownText().orEmpty().split(","))
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .joinToString()
         }
 
         val statutText = document.selectFirst("div.titres_souspart:has(div:containsOwn(Statut))")?.ownText()?.lowercase().orEmpty()
@@ -227,11 +184,9 @@ abstract class ScanManga :
         thumbnail_url = document.selectFirst("meta[itemprop=image]")?.absUrl("content")
     }
 
-    // Chapters
-    override fun chapterListParse(response: Response): List<SChapter> {
-        response.requireSourceResponse()
-        val document = response.asJsoup()
-        return document.select("div.chapt_m").map { element ->
+    private fun chapterListParse(document: Document): List<SChapter> {
+        // Licensed series also list chapters hosted by external publishers (izneo, mangaplus, ono.live).
+        val chapters = document.select("div.chapt_m:has(td.publimg a[href*=/lecture-en-ligne/])").map { element ->
             val linkEl = element.selectFirst("td.publimg span.i a")!!
             val titleEl = element.selectFirst("td.publititle")
 
@@ -379,14 +334,8 @@ abstract class ScanManga :
         }
     }
 
-    override fun pageListParse(response: Response): List<Page> {
-        response.requireSourceResponse()
-        return parsePageList(response.asJsoup())
-    }
-
-    private fun parsePageList(document: org.jsoup.nodes.Document): List<Page> {
-        val packedScript = document.selectFirst(PACKED_SCRIPT_SELECTOR)?.data()
-            ?: throw IOException("Le lecteur Scan-Manga n'a pas trouvé les données du chapitre.")
+    private suspend fun parsePageList(document: Document): List<Page> {
+        val packedScript = document.selectFirst(PACKED_SCRIPT_SELECTOR)!!.data()
         val unpackedScript = decodeHunter(packedScript)
 
         val (sml) = SML_PARAM_REGEX.find(unpackedScript)?.destructured

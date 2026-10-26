@@ -3,6 +3,7 @@ import hashlib
 import html
 import json
 import math
+import os
 import sys
 import time
 from pathlib import Path
@@ -13,7 +14,7 @@ from google.protobuf import json_format
 
 # Artifacts downloaded from the build jobs: one APK per extension plus the source metadata JSON
 # emitted by each assembleRelease.
-ARTIFACTS_DIR = Path.home() / "apk-artifacts"
+ARTIFACTS_DIR = Path(os.getenv("NOVA_ARTIFACTS_DIR", Path.home() / "apk-artifacts"))
 
 # The checked-out `repo` branch we publish into (the working directory).
 REPO_DIR = Path.cwd()

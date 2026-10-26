@@ -8,21 +8,25 @@ import android.graphics.Typeface
 import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.parseAs
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
@@ -30,7 +34,6 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.jsoup.Jsoup
-import rx.Observable
 import java.io.ByteArrayOutputStream
 import java.net.URLEncoder
 import java.time.Instant
@@ -38,86 +41,66 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.max
 
 @Source
-abstract class NovelFrance : HttpSource() {
+abstract class NovelFrance : KeiSource() {
 
     override val supportsLatest = true
 
     private val pageCache = ConcurrentHashMap<String, List<String>>()
 
-    override val client: OkHttpClient = super.client.newBuilder()
-        .addInterceptor { chain ->
-            val request = chain.request()
-            if (request.url.encodedPath == RENDER_PATH) {
-                renderImageResponse(request)
-            } else {
-                chain.proceed(request)
-            }
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = addInterceptor { chain ->
+        val request = chain.request()
+        if (request.url.encodedPath == RENDER_PATH) {
+            renderImageResponse(request)
+        } else {
+            chain.proceed(request)
         }
-        .build()
-
-    // ============================== Popular ===============================
-
-    override fun popularMangaRequest(page: Int): Request = novelsRequest(page = page, sort = "popular")
-
-    override fun popularMangaParse(response: Response): MangasPage {
-        val data = response.parseAs<NFNovelsResponse>()
-        return MangasPage(data.novels.map(::toSManga), data.page < data.totalPages)
     }
 
-    // =============================== Latest ===============================
+    override suspend fun getPopularManga(page: Int): MangasPage = fetchNovels(page, sort = "popular").toMangasPage()
 
-    override fun latestUpdatesRequest(page: Int): Request = novelsRequest(page = page, sort = "latest")
+    override suspend fun getLatestUpdates(page: Int): MangasPage = fetchNovels(page, sort = "latest").toMangasPage()
 
-    override fun latestUpdatesParse(response: Response): MangasPage = popularMangaParse(response)
-
-    // =============================== Search ===============================
-
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         if (query.isNotBlank()) {
-            return GET("$baseUrl/api/search?q=${query.urlEncode()}", headers)
+            val data = client.get("$baseUrl/api/search?q=${query.urlEncode()}").parseAs<NFSearchResponse>()
+            return MangasPage(data.novels.map(::toSManga), data.hasMore)
         }
 
         val sort = filters.filterIsInstance<SortFilter>().firstOrNull()?.selectedValue ?: "popular"
         val genre = filters.filterIsInstance<GenreFilter>().firstOrNull()?.selectedValue
-        return novelsRequest(page = page, sort = sort, genre = genre)
+        return fetchNovels(page, sort, genre).toMangasPage()
     }
 
-    override fun searchMangaParse(response: Response): MangasPage = if (response.request.url.encodedPath == "/api/search") {
-        val data = response.parseAs<NFSearchResponse>()
-        MangasPage(data.novels.map(::toSManga), data.hasMore)
-    } else {
-        popularMangaParse(response)
+    override fun getFilterList(data: JsonElement?): FilterList = FilterList(SortFilter(), GenreFilter())
+
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.host != baseUrl.toHttpUrl().host || url.pathSegments.firstOrNull() != "novel") return null
+        val slug = url.pathSegments.getOrNull(1) ?: return null
+        return client.get("$baseUrl/api/novels/$slug").parseAs<NFNovel>().let(::toSManga)
     }
-
-    override fun getFilterList(): FilterList = FilterList(SortFilter(), GenreFilter())
-
-    // =========================== Manga Details ============================
-
-    override fun mangaDetailsRequest(manga: SManga): Request = GET("$baseUrl/api/novels/${manga.url.slugFromNovelPath()}", headers)
-
-    override fun mangaDetailsParse(response: Response): SManga = toSManga(response.parseAs<NFNovel>())
 
     override fun getMangaUrl(manga: SManga): String = "$baseUrl${manga.url}"
 
-    // ============================== Chapters ==============================
-
-    override fun chapterListRequest(manga: SManga): Request = GET("$baseUrl/api/chapters/${manga.url.slugFromNovelPath()}?skip=0&take=$PAGE_SIZE", headers)
-
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val slug = response.request.url.encodedPath.substringAfterLast("/")
-        val data = response.parseAs<NFChaptersResponse>()
-        return data.chapters.toSChapterList(slug)
-    }
-
-    override fun fetchChapterList(manga: SManga): Observable<List<SChapter>> = Observable.fromCallable {
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate = coroutineScope {
         val slug = manga.url.slugFromNovelPath()
-        val first = fetchChapterPage(slug, skip = 0)
-        val chapters = first.chapters.toMutableList()
-        if (first.hasMore) {
-            val skips = (PAGE_SIZE until first.total step PAGE_SIZE).toList()
-            chapters += fetchChapterPages(slug, skips)
+        val detailsDeferred = if (fetchDetails) {
+            async {
+                client.get("$baseUrl/api/novels/$slug").parseAs<NFNovel>().let(::toSManga)
+            }
+        } else {
+            null
         }
-        chapters.toSChapterList(slug)
+        val chaptersDeferred = if (fetchChapters) async { fetchAllChapters(slug) } else null
+
+        SMangaUpdate(
+            detailsDeferred?.await() ?: manga,
+            chaptersDeferred?.await() ?: chapters,
+        )
     }
 
     override fun getChapterUrl(chapter: SChapter): String {
@@ -125,24 +108,14 @@ abstract class NovelFrance : HttpSource() {
         return "$baseUrl/novel/$novelSlug/$chapterSlug"
     }
 
-    // =============================== Pages ================================
-
-    override fun pageListRequest(chapter: SChapter): Request {
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
         val (novelSlug, chapterSlug) = chapter.url.chapterPathParts()
-        return GET("$baseUrl/api/chapters/$novelSlug/$chapterSlug", headers)
-    }
-
-    override fun pageListParse(response: Response): List<Page> {
-        val content = response.parseAs<NFChapterContent>()
-        val chapterUrl = "/novel/${response.request.url.pathSegments[2]}/${content.slug}"
+        val content = client.get("$baseUrl/api/chapters/$novelSlug/$chapterSlug").parseAs<NFChapterContent>()
+        val chapterUrl = "/novel/$novelSlug/${content.slug}"
         val chunks = content.toChunks()
         pageCache[chapterUrl] = chunks
         return chunks.toPages(chapterUrl)
     }
-
-    override fun fetchImageUrl(page: Page): Observable<String> = Observable.just(page.imageUrl ?: page.url)
-
-    override fun imageUrlParse(response: Response): String = response.request.url.toString()
 
     private fun renderImageResponse(request: Request): Response {
         val chapterUrl = request.url.queryParameter("chapter").orEmpty()
@@ -161,7 +134,7 @@ abstract class NovelFrance : HttpSource() {
 
     // =============================== Utils ================================
 
-    private fun novelsRequest(page: Int, sort: String, genre: String? = null): Request {
+    private suspend fun fetchNovels(page: Int, sort: String, genre: String? = null): NFNovelsResponse {
         val params = buildList {
             add("sort=${sort.urlEncode()}")
             add("page=$page")
@@ -169,39 +142,43 @@ abstract class NovelFrance : HttpSource() {
                 add("genre=${genre.urlEncode()}")
             }
         }.joinToString("&")
-        return GET("$baseUrl/api/novels?$params", headers)
+        return client.get("$baseUrl/api/novels?$params").parseAs()
     }
 
-    private fun fetchChapterPage(slug: String, skip: Int): NFChaptersResponse {
-        val request = GET("$baseUrl/api/chapters/$slug?skip=$skip&take=$PAGE_SIZE", headers)
-        return client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) error("Impossible de charger les chapitres NovelFrance")
-            response.parseAs()
+    private fun NFNovelsResponse.toMangasPage(): MangasPage = MangasPage(
+        novels.map(::toSManga),
+        page < totalPages,
+    )
+
+    private suspend fun fetchAllChapters(slug: String): List<SChapter> {
+        val first = fetchChapterPage(slug, skip = 0)
+        val chapters = first.chapters.toMutableList()
+        if (first.hasMore) {
+            chapters += fetchChapterPages(slug, (PAGE_SIZE until first.total step PAGE_SIZE).toList())
         }
+        return chapters.toSChapterList(slug)
     }
 
-    private fun fetchChapterPages(slug: String, skips: List<Int>): List<NFChapter> = runBlocking {
+    private suspend fun fetchChapterPage(slug: String, skip: Int): NFChaptersResponse = client.get("$baseUrl/api/chapters/$slug?skip=$skip&take=$PAGE_SIZE").parseAs()
+
+    private suspend fun fetchChapterPages(slug: String, skips: List<Int>): List<NFChapter> = coroutineScope {
         skips
             .chunked(MAX_CONCURRENT_CHAPTER_PAGE_REQUESTS)
             .flatMap { chunk ->
                 chunk
                     .map { skip ->
-                        async(Dispatchers.IO) { fetchChapterPageOrNull(slug, skip)?.chapters.orEmpty() }
+                        async { fetchChapterPageOrNull(slug, skip)?.chapters.orEmpty() }
                     }
                     .awaitAll()
                     .flatten()
             }
     }
 
-    private fun fetchChapterPageOrNull(slug: String, skip: Int): NFChaptersResponse? = runCatching { fetchChapterPage(slug, skip) }.getOrNull()
+    private suspend fun fetchChapterPageOrNull(slug: String, skip: Int): NFChaptersResponse? = runCatching { fetchChapterPage(slug, skip) }.getOrNull()
 
-    private fun fetchChapterChunks(chapterUrl: String): List<String> {
+    private fun fetchChapterChunks(chapterUrl: String): List<String> = runBlocking {
         val (novelSlug, chapterSlug) = chapterUrl.chapterPathParts()
-        val request = GET("$baseUrl/api/chapters/$novelSlug/$chapterSlug", headers)
-        return client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) error("Impossible de charger le chapitre NovelFrance")
-            response.parseAs<NFChapterContent>().toChunks()
-        }
+        client.get("$baseUrl/api/chapters/$novelSlug/$chapterSlug").parseAs<NFChapterContent>().toChunks()
     }
 
     private fun NFChapterContent.toChunks(): List<String> {
